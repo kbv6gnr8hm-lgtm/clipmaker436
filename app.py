@@ -108,24 +108,37 @@ def download_video(url: str, folder: Path) -> tuple[Path, str, float]:
     return candidates[0], title, duration
 
 
-def transcribe(video: Path) -> tuple[list[Word], list[Segment]]:
-    from faster_whisper import WhisperModel
-
-    model_name = os.getenv("WHISPER_MODEL", "small.en")
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    raw_segments, _ = model.transcribe(
-        str(video), language="en", vad_filter=True, word_timestamps=True,
-        beam_size=5, condition_on_previous_text=False
-    )
+def transcribe(url: str, folder: Path) -> tuple[list[Word], list[Segment]]:
+    # Reuse YouTube's timed English captions. This avoids loading a large speech
+    # model in the small web container and gives us timing for animated text.
+    template = folder / "captions.%(ext)s"
+    run([
+        "yt-dlp", "--no-playlist", "--skip-download", "--write-subs",
+        "--write-auto-subs", "--sub-langs", "en.*,en", "--sub-format", "json3",
+        "-o", str(template), url,
+    ])
+    caption_files = sorted(folder.glob("captions*.json3"))
+    if not caption_files:
+        raise RuntimeError("This video has no English captions. Try a video with English subtitles enabled.")
+    data = json.loads(caption_files[0].read_text(encoding="utf-8"))
     words: list[Word] = []
     segments: list[Segment] = []
-    for seg in raw_segments:
-        text = seg.text.strip()
-        segments.append(Segment(float(seg.start), float(seg.end), text))
-        for word in seg.words or []:
-            token = word.word.strip()
-            if token:
-                words.append(Word(float(word.start), float(word.end), token))
+    for event in data.get("events", []):
+        start = float(event.get("tStartMs", 0)) / 1000
+        duration = float(event.get("dDurationMs", 0)) / 1000
+        text = "".join(x.get("utf8", "") for x in event.get("segs", []))
+        text = text.replace("\n", " ").strip()
+        if not text or text.startswith("["):
+            continue
+        end = start + max(duration, 0.15)
+        segments.append(Segment(start, end, text))
+        tokens = text.split()
+        step = max(0.08, (end - start) / max(1, len(tokens)))
+        for index, token in enumerate(tokens):
+            word_start = start + index * step
+            words.append(Word(word_start, min(end, word_start + step), token))
+    if not segments:
+        raise RuntimeError("English captions were found but contained no usable speech.")
     return words, segments
 
 
@@ -265,7 +278,7 @@ def process_job(job_id: str, url: str) -> None:
         update(job_id, status="working", progress=5, message="Downloading video")
         video, source_title, duration = download_video(url, folder)
         update(job_id, progress=25, message="Finding the strongest moments")
-        words, transcript = transcribe(video)
+        words, transcript = transcribe(url, folder)
         picks = choose_clips(transcript, duration)
         if not picks:
             raise RuntimeError("Could not find enough spoken content for clips")
@@ -297,7 +310,9 @@ def process_job(job_id: str, url: str) -> None:
             zip_url=f"/api/jobs/{job_id}/zip",
         )
     except Exception as exc:
-        update(job_id, status="error", message=str(exc), progress=0)
+        message = str(exc).strip() or f"{type(exc).__name__}: processing failed"
+        print(f"Job {job_id} failed: {type(exc).__name__}: {message}", flush=True)
+        update(job_id, status="error", message=message, progress=0)
 
 
 @app.get("/", response_class=HTMLResponse)
