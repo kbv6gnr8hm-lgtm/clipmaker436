@@ -89,7 +89,8 @@ class Segment:
 
 def download_video(url: str, folder: Path) -> tuple[Path, str, float]:
     metadata = run([
-        "yt-dlp", "--dump-single-json", "--no-playlist", "--skip-download", url
+        "yt-dlp", "--js-runtimes", "node", "--dump-single-json",
+        "--no-playlist", "--skip-download", url
     ])
     info = json.loads(metadata)
     duration = float(info.get("duration") or 0)
@@ -98,7 +99,7 @@ def download_video(url: str, folder: Path) -> tuple[Path, str, float]:
     title = info.get("title") or "YouTube video"
     output = folder / "source.%(ext)s"
     run([
-        "yt-dlp", "--no-playlist", "--no-progress",
+        "yt-dlp", "--js-runtimes", "node", "--no-playlist", "--no-progress",
         "-f", "bv*[height<=1080]+ba/b[height<=1080]",
         "--merge-output-format", "mp4", "-o", str(output), url
     ])
@@ -113,7 +114,7 @@ def transcribe(url: str, folder: Path) -> tuple[list[Word], list[Segment]]:
     # model in the small web container and gives us timing for animated text.
     template = folder / "captions.%(ext)s"
     run([
-        "yt-dlp", "--no-playlist", "--skip-download", "--write-subs",
+        "yt-dlp", "--js-runtimes", "node", "--no-playlist", "--skip-download", "--write-subs",
         "--write-auto-subs", "--sub-langs", "en.*,en", "--sub-format", "json3",
         "-o", str(template), url,
     ])
